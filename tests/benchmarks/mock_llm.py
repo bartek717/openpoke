@@ -86,3 +86,136 @@ def _default_final_response() -> Dict[str, Any]:
             }
         ]
     }
+
+
+# ---------------------------------------------------------------------------
+# Pre-built scenarios for V2
+# ---------------------------------------------------------------------------
+
+def _tool_call(call_id: str, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a single tool_call entry in OpenRouter response format."""
+    import json as _json
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": _json.dumps(arguments),
+        },
+    }
+
+
+def scenario_dispatch_one(agent_name: str = "Benchmark Agent") -> List[Dict[str, Any]]:
+    """LLM calls send_message_to_user + send_message_to_agent, then stops.
+
+    Call 0: returns two tool calls (user message + agent dispatch)
+    Call 1: (after tool results) returns final text, no tool calls
+    """
+    return [
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            _tool_call(
+                                "call_user_1",
+                                "send_message_to_user",
+                                {"message": "On it, working on that now."},
+                            ),
+                            _tool_call(
+                                "call_agent_1",
+                                "send_message_to_agent",
+                                {
+                                    "agent_name": agent_name,
+                                    "instructions": "Complete the benchmark task.",
+                                },
+                            ),
+                        ],
+                    }
+                }
+            ]
+        },
+        # Second call: final response after tool results
+        _default_final_response(),
+    ]
+
+
+def scenario_reuse_agent(agent_name: str) -> List[Dict[str, Any]]:
+    """LLM reuses an existing agent by name."""
+    return [
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            _tool_call(
+                                "call_user_1",
+                                "send_message_to_user",
+                                {"message": "Following up on that."},
+                            ),
+                            _tool_call(
+                                "call_agent_1",
+                                "send_message_to_agent",
+                                {
+                                    "agent_name": agent_name,
+                                    "instructions": "Follow up on the previous task.",
+                                },
+                            ),
+                        ],
+                    }
+                }
+            ]
+        },
+        _default_final_response(),
+    ]
+
+
+def scenario_fan_out(agent_names: List[str]) -> List[Dict[str, Any]]:
+    """LLM dispatches to multiple agents in one turn."""
+    tool_calls = [
+        _tool_call(
+            "call_user_1",
+            "send_message_to_user",
+            {"message": "Working on all of those now."},
+        ),
+    ]
+    for i, name in enumerate(agent_names):
+        tool_calls.append(
+            _tool_call(
+                f"call_agent_{i + 1}",
+                "send_message_to_agent",
+                {
+                    "agent_name": name,
+                    "instructions": f"Task {i + 1} for {name}.",
+                },
+            )
+        )
+    return [
+        {"choices": [{"message": {"content": "", "tool_calls": tool_calls}}]},
+        _default_final_response(),
+    ]
+
+
+def scenario_noop() -> List[Dict[str, Any]]:
+    """LLM calls wait tool (no-op)."""
+    return [
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            _tool_call(
+                                "call_wait_1",
+                                "wait",
+                                {"reason": "Message already sent."},
+                            ),
+                        ],
+                    }
+                }
+            ]
+        },
+        _default_final_response(),
+    ]

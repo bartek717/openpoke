@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -12,6 +13,7 @@ from server.services.execution.roster import AgentRoster
 from server.services.execution.log_store import ExecutionAgentLogStore
 from server.services.conversation.log import ConversationLog
 from server.services.conversation.summarization.working_memory_log import WorkingMemoryLog
+from server.agents.interaction_agent.tools import ToolResult
 
 from .factories import populate_roster, write_conversation_log
 from .mock_llm import MockOpenRouterResponder
@@ -193,6 +195,22 @@ def wired_env(
         "server.agents.execution_agent.runtime.request_chat_completion", mock_llm
     )
 
+    # --- V2: Stub out the batch manager so send_message_to_agent doesn't
+    # fire real execution agents ---
+    from server.agents.execution_agent.runtime import ExecutionResult
+
+    async def _noop_execute_agent(agent_name, instructions, request_id=None):
+        return ExecutionResult(
+            agent_name=agent_name,
+            success=True,
+            response="Mocked execution.",
+        )
+
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.tools._EXECUTION_BATCH_MANAGER.execute_agent",
+        _noop_execute_agent,
+    )
+
     class _WiredEnv:
         roster = temp_roster
         conversation_log = temp_conversation_log
@@ -202,3 +220,47 @@ def wired_env(
         llm = mock_llm
 
     return _WiredEnv()
+
+
+# ---------------------------------------------------------------------------
+# V2: Tool call recorder
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ToolInvocation:
+    """A single recorded tool call."""
+    name: str
+    arguments: Dict[str, Any]
+    result: ToolResult
+
+
+class ToolCallRecorder:
+    """Wraps handle_tool_call to record ordered invocations."""
+
+    def __init__(self, original_fn: Callable):
+        self._original = original_fn
+        self.invocations: List[ToolInvocation] = []
+
+    def __call__(self, name: str, arguments: Any) -> ToolResult:
+        result = self._original(name, arguments)
+        self.invocations.append(ToolInvocation(
+            name=name,
+            arguments=arguments if isinstance(arguments, dict) else {},
+            result=result,
+        ))
+        return result
+
+
+@pytest.fixture()
+def tool_recorder(monkeypatch: pytest.MonkeyPatch, wired_env) -> ToolCallRecorder:
+    """Wrap handle_tool_call with a recorder. Must be used after wired_env."""
+    from server.agents.interaction_agent.tools import handle_tool_call
+
+    recorder = ToolCallRecorder(handle_tool_call)
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.tools.handle_tool_call", recorder
+    )
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.runtime.handle_tool_call", recorder
+    )
+    return recorder
