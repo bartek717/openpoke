@@ -11,10 +11,8 @@ import pytest
 
 from server.services.execution.roster import AgentRoster
 
+from .conftest import AGENT_COUNTS
 from .factories import generate_agent_names
-
-
-AGENT_COUNTS = [5, 25, 100, 500, 1000, 2000]
 
 
 @pytest.fixture()

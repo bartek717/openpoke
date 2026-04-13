@@ -13,7 +13,7 @@ import pytest
 
 from server.agents.interaction_agent.runtime import InteractionAgentRuntime
 
-from .conftest import ToolCallRecorder
+from .conftest import AGENT_COUNTS, ToolCallRecorder
 from .factories import populate_roster, write_conversation_log
 from .mock_llm import (
     MockOpenRouterResponder,
@@ -22,9 +22,6 @@ from .mock_llm import (
     scenario_noop,
     scenario_reuse_agent,
 )
-
-
-AGENT_COUNTS = [5, 25, 100, 500, 1000, 2000]
 
 
 def _format_tool_sequence(recorder: ToolCallRecorder) -> str:

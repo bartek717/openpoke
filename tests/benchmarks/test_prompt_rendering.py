@@ -24,13 +24,13 @@ from server.agents.interaction_agent.agent import (
 )
 from server.agents.interaction_agent.tools import get_tool_schemas
 
+from .conftest import AGENT_COUNTS
 from .factories import populate_roster, write_conversation_log
 from .metrics import BenchmarkReport, PromptRenderingResult
 
 
 _ENCODER = tiktoken.get_encoding("cl100k_base")
 
-AGENT_COUNTS = [5, 25, 100, 500, 1000, 2000]
 FIXED_CONVERSATION_TURNS = 50
 
 

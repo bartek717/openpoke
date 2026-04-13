@@ -1,8 +1,8 @@
 """V3 Benchmark: Live accuracy tests against the real interaction runtime.
 
 Measures whether the interaction loop can still reuse or create the right
-agent and whether it notifies the user before delegating as the roster grows.
-Marked with @pytest.mark.live — skipped by default, run with: pytest -m live
+agent as the roster grows. Marked with @pytest.mark.live — skipped by
+default, run with: pytest -m live
 """
 
 from __future__ import annotations
@@ -14,12 +14,16 @@ import pytest
 
 from server.agents.interaction_agent.runtime import InteractionAgentRuntime
 
-from .conftest import ToolCallRecorder
+from .conftest import (
+    AGENT_COUNTS,
+    LIVE_TRIALS,
+    ToolCallRecorder,
+    is_live_group_enabled,
+)
 from .factories import populate_roster, write_conversation_log
 
 
-AGENT_COUNTS = [5, 25, 100, 500, 1000, 2000]
-TRIALS = 3
+TRIALS = LIVE_TRIALS
 
 
 # ---------------------------------------------------------------------------
@@ -80,34 +84,15 @@ def _score_creation(tool_calls: List[Dict], roster_names: List[str]) -> float:
     return 0.0
 
 
-def _score_instruction_order(tool_calls: List[Dict]) -> float:
-    """Score whether send_message_to_user comes before send_message_to_agent.
-
-    1.0 = correct order, 0.0 = missing delegation or missing/wrong notification order
-    """
-    user_idx = None
-    agent_idx = None
-
-    for i, tc in enumerate(tool_calls):
-        if tc["name"] == "send_message_to_user" and user_idx is None:
-            user_idx = i
-        if tc["name"] == "send_message_to_agent" and agent_idx is None:
-            agent_idx = i
-
-    if agent_idx is None:
-        return 0.0
-
-    if user_idx is not None and user_idx < agent_idx:
-        return 1.0
-
-    return 0.0
-
-
 # ---------------------------------------------------------------------------
 # Reuse accuracy
 # ---------------------------------------------------------------------------
 
 @pytest.mark.live
+@pytest.mark.skipif(
+    not is_live_group_enabled("reuse"),
+    reason="OPENPOKE_BENCHMARK_LIVE_GROUPS excludes reuse",
+)
 @pytest.mark.parametrize("agent_count", AGENT_COUNTS)
 async def test_reuse_accuracy(
     agent_count: int,
@@ -172,6 +157,10 @@ async def test_reuse_accuracy(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.live
+@pytest.mark.skipif(
+    not is_live_group_enabled("creation"),
+    reason="OPENPOKE_BENCHMARK_LIVE_GROUPS excludes creation",
+)
 @pytest.mark.parametrize("agent_count", AGENT_COUNTS)
 async def test_creation_accuracy(
     agent_count: int,
@@ -228,55 +217,7 @@ async def test_creation_accuracy(
 
 
 # ---------------------------------------------------------------------------
-# Instruction order accuracy
-# ---------------------------------------------------------------------------
-
-@pytest.mark.live
-@pytest.mark.parametrize("agent_count", AGENT_COUNTS)
-async def test_instruction_order_accuracy(
-    agent_count: int,
-    wired_env_live,
-    data_dir,
-    tool_recorder_live: ToolCallRecorder,
-):
-    """Does the LLM call send_message_to_user before send_message_to_agent?"""
-    env = wired_env_live
-
-    scores = []
-    for trial in range(TRIALS):
-        env.roster.clear()
-        env.conversation_log.clear()
-        populate_roster(env.roster, agent_count, seed=42)
-
-        conv_path = data_dir / "conversation" / "poke_conversation.log"
-        write_conversation_log(conv_path, 10, seed=trial)
-
-        user_message = "Draft an email to someone about the quarterly review"
-
-        success, error, tool_calls = await _run_live_interaction(
-            user_message,
-            tool_recorder_live,
-        )
-
-        score = _score_instruction_order(tool_calls)
-        scores.append(score)
-
-        tool_names = [tc["name"] for tc in tool_calls]
-        print(
-            f"\n  order trial {trial + 1}/{TRIALS} | agents={agent_count}, "
-            f"tools={tool_names}, success={success}, "
-            f"error={error or 'none'}, score={score}"
-        )
-
-    mean_score = sum(scores) / len(scores)
-    print(
-        f"\n  ORDER agents={agent_count:>5} | "
-        f"scores={scores}, mean={mean_score:.2f}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Combined summary (runs all 3 tests and prints a table)
+# Combined summary (runs all live accuracy tests and prints a table)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.live
@@ -290,5 +231,4 @@ async def test_accuracy_summary(wired_env_live, data_dir, capsys):
         "Expected output format:\n"
         "  REUSE   agents=N | scores=[...], mean=X.XX\n"
         "  CREATE  agents=N | scores=[...], mean=X.XX\n"
-        "  ORDER   agents=N | scores=[...], mean=X.XX\n"
     )

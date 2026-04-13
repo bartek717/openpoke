@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List
@@ -22,8 +23,100 @@ from .mock_llm import MockOpenRouterResponder
 # Parametrize helpers
 # ---------------------------------------------------------------------------
 
-AGENT_COUNTS = [5, 25, 100, 500, 1000, 2000]
+DEFAULT_AGENT_COUNTS = [5, 25, 100, 500, 1000, 2000]
+DEFAULT_LIVE_TRIALS = 3
+DEFAULT_LIVE_GROUPS = ("reuse", "creation")
 CONVERSATION_TURNS = [50, 200, 500]
+
+
+def _parse_agent_counts(value: str | None) -> list[int]:
+    if not value:
+        return DEFAULT_AGENT_COUNTS.copy()
+
+    counts: list[int] = []
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        try:
+            count = int(part)
+        except ValueError as exc:
+            raise ValueError(
+                "OPENPOKE_BENCHMARK_AGENT_COUNTS must be a comma-separated list "
+                f"of integers, got {value!r}"
+            ) from exc
+        if count <= 0:
+            raise ValueError(
+                "OPENPOKE_BENCHMARK_AGENT_COUNTS values must be positive, "
+                f"got {count}"
+            )
+        counts.append(count)
+
+    if not counts:
+        raise ValueError(
+            "OPENPOKE_BENCHMARK_AGENT_COUNTS must include at least one agent count"
+        )
+
+    return counts
+
+
+def _parse_live_trials(value: str | None) -> int:
+    if not value:
+        return DEFAULT_LIVE_TRIALS
+
+    try:
+        trials = int(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"OPENPOKE_BENCHMARK_TRIALS must be an integer, got {value!r}"
+        ) from exc
+
+    if trials <= 0:
+        raise ValueError(
+            f"OPENPOKE_BENCHMARK_TRIALS must be positive, got {trials}"
+        )
+
+    return trials
+
+
+def _parse_live_groups(value: str | None) -> set[str]:
+    if not value:
+        return set(DEFAULT_LIVE_GROUPS)
+
+    allowed = {"all", "reuse", "creation"}
+    aliases = {"create": "creation"}
+    groups: set[str] = set()
+
+    for raw_part in value.split(","):
+        part = raw_part.strip().lower()
+        if not part:
+            continue
+        normalized = aliases.get(part, part)
+        if normalized not in allowed:
+            raise ValueError(
+                "OPENPOKE_BENCHMARK_LIVE_GROUPS must contain only "
+                f"{sorted(allowed)}, got {value!r}"
+            )
+        groups.add(normalized)
+
+    if not groups:
+        raise ValueError(
+            "OPENPOKE_BENCHMARK_LIVE_GROUPS must include at least one group"
+        )
+
+    if "all" in groups:
+        return {"reuse", "creation"}
+
+    return groups
+
+
+AGENT_COUNTS = _parse_agent_counts(os.getenv("OPENPOKE_BENCHMARK_AGENT_COUNTS"))
+LIVE_TRIALS = _parse_live_trials(os.getenv("OPENPOKE_BENCHMARK_TRIALS"))
+LIVE_GROUPS = _parse_live_groups(os.getenv("OPENPOKE_BENCHMARK_LIVE_GROUPS"))
+
+
+def is_live_group_enabled(group: str) -> bool:
+    return group in LIVE_GROUPS
 
 
 # ---------------------------------------------------------------------------
@@ -76,8 +169,6 @@ def temp_exec_logs(data_dir: Path) -> ExecutionAgentLogStore:
 
 @pytest.fixture()
 def fake_settings() -> Settings:
-    import os
-
     get_settings.cache_clear()
     benchmark_model = os.getenv("OPENPOKE_BENCHMARK_MODEL", "anthropic/claude-sonnet-4")
     return Settings(
@@ -333,8 +424,6 @@ def tool_recorder(monkeypatch: pytest.MonkeyPatch, wired_env) -> ToolCallRecorde
 @pytest.fixture()
 def live_settings() -> Settings:
     """Settings using the real API key and a cheap benchmark model override."""
-    import os
-
     get_settings.cache_clear()
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
