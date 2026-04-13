@@ -16,6 +16,10 @@ from server.services.conversation.log import ConversationLog
 from server.services.conversation.summarization.working_memory_log import WorkingMemoryLog
 from server.agents.interaction_agent.tools import ToolResult
 
+from .support.implementations import (
+    get_selected_implementation_name,
+    prepare_message_with_history_impl,
+)
 from .support.mock_llm import MockOpenRouterResponder
 
 
@@ -113,10 +117,15 @@ def _parse_live_groups(value: str | None) -> set[str]:
 AGENT_COUNTS = _parse_agent_counts(os.getenv("OPENPOKE_BENCHMARK_AGENT_COUNTS"))
 LIVE_TRIALS = _parse_live_trials(os.getenv("OPENPOKE_BENCHMARK_TRIALS"))
 LIVE_GROUPS = _parse_live_groups(os.getenv("OPENPOKE_BENCHMARK_LIVE_GROUPS"))
+BENCHMARK_IMPLEMENTATION = get_selected_implementation_name()
 
 
 def is_live_group_enabled(group: str) -> bool:
     return group in LIVE_GROUPS
+
+
+def get_benchmark_implementation_name() -> str:
+    return BENCHMARK_IMPLEMENTATION
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +332,19 @@ def _patch_batch_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _patch_benchmark_implementation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route prompt construction through the selected benchmark implementation."""
+
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.agent.prepare_message_with_history",
+        prepare_message_with_history_impl,
+    )
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.runtime.prepare_message_with_history",
+        prepare_message_with_history_impl,
+    )
+
+
 def _install_tool_recorder(monkeypatch: pytest.MonkeyPatch) -> "ToolCallRecorder":
     """Wrap handle_tool_call and patch both the tools and runtime import sites."""
 
@@ -370,6 +392,7 @@ def wired_env(
     )
 
     _patch_batch_manager(monkeypatch)
+    _patch_benchmark_implementation(monkeypatch)
 
     class _WiredEnv:
         roster = temp_roster
@@ -457,6 +480,7 @@ def wired_env_live(
         temp_exec_logs=temp_exec_logs,
     )
     _patch_batch_manager(monkeypatch)
+    _patch_benchmark_implementation(monkeypatch)
 
     class _LiveEnv:
         roster = temp_roster

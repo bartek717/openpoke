@@ -18,9 +18,11 @@ from ..conftest import (
     AGENT_COUNTS,
     LIVE_TRIALS,
     ToolCallRecorder,
+    get_benchmark_implementation_name,
     is_live_group_enabled,
 )
 from ..support.factories import populate_roster, write_conversation_log
+from ..support.prompt_stats import FIXED_CONVERSATION_TURNS, measure_prompt_stats
 
 
 TRIALS = LIVE_TRIALS
@@ -28,6 +30,8 @@ LIVE_RESULTS: Dict[str, Dict[int, Dict[str, Any]]] = {
     "reuse": {},
     "creation": {},
 }
+PROMPT_RESULTS: Dict[int, Dict[str, Any]] = {}
+SUMMARY_METADATA: Dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +104,18 @@ def _record_live_result(
     }
 
 
+def _record_prompt_result(agent_count: int, stats: Any) -> None:
+    first_call_ms = stats.roster_load_ms + stats.render_ms
+    PROMPT_RESULTS[agent_count] = {
+        "payload_bytes": stats.payload_bytes,
+        "estimated_tokens": stats.estimated_tokens,
+        "roster_tokens": stats.roster_tokens,
+        "impl_overhead_ms": stats.impl_overhead_ms,
+        "first_call_ms": first_call_ms,
+        "total_pre_llm_ms": stats.impl_overhead_ms + first_call_ms,
+    }
+
+
 def _format_accuracy_summary_table() -> str:
     enabled_groups = [
         group for group in ("reuse", "creation") if is_live_group_enabled(group)
@@ -107,20 +123,89 @@ def _format_accuracy_summary_table() -> str:
     if not enabled_groups:
         return "No live groups enabled."
 
-    headers = ["agents", *enabled_groups]
-    align = ["-----:", *["-----:" for _ in enabled_groups]]
+    baseline = PROMPT_RESULTS.get(5)
+    headers = [
+        "agents",
+        "prompt_kb",
+        "kb_vs_5",
+        "tokens",
+        "toks_vs_5",
+        "roster_toks",
+        "roster_vs_5",
+        "roster_pct",
+        "impl_overhead_ms",
+        "first_call_ms",
+        "total_pre_llm_ms",
+        *enabled_groups,
+    ]
+    align = [
+        "-----:",
+        "--------:",
+        "-------:",
+        "------:",
+        "---------:",
+        "-----------:",
+        "-----------:",
+        "----------:",
+        "----------------:",
+        "-------------:",
+        "----------------:",
+        *["-----:" for _ in enabled_groups],
+    ]
     lines = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(align) + " |",
     ]
 
     for agent_count in AGENT_COUNTS:
-        row = [str(agent_count)]
+        prompt = PROMPT_RESULTS.get(agent_count)
+        if prompt is not None and prompt["estimated_tokens"] > 0:
+            roster_pct = prompt["roster_tokens"] / prompt["estimated_tokens"] * 100
+        else:
+            roster_pct = None
+
+        if prompt is not None and baseline is not None:
+            kb_vs_5 = (prompt["payload_bytes"] - baseline["payload_bytes"]) / 1024
+            toks_vs_5 = prompt["estimated_tokens"] - baseline["estimated_tokens"]
+            roster_vs_5 = prompt["roster_tokens"] - baseline["roster_tokens"]
+        else:
+            kb_vs_5 = toks_vs_5 = roster_vs_5 = None
+
+        row = [
+            str(agent_count),
+            f"{prompt['payload_bytes'] / 1024:.1f}" if prompt is not None else "-",
+            f"{kb_vs_5:+.1f}" if kb_vs_5 is not None else "-",
+            f"{prompt['estimated_tokens']:,}" if prompt is not None else "-",
+            f"{toks_vs_5:+,}" if toks_vs_5 is not None else "-",
+            f"{prompt['roster_tokens']:,}" if prompt is not None else "-",
+            f"{roster_vs_5:+,}" if roster_vs_5 is not None else "-",
+            f"{roster_pct:.1f}%" if roster_pct is not None else "-",
+            f"{prompt['impl_overhead_ms']:.2f}" if prompt is not None else "-",
+            f"{prompt['first_call_ms']:.2f}" if prompt is not None else "-",
+            f"{prompt['total_pre_llm_ms']:.2f}" if prompt is not None else "-",
+        ]
         for group in enabled_groups:
             result = LIVE_RESULTS[group].get(agent_count)
             row.append(f"{result['mean']:.2f}" if result is not None else "-")
         lines.append("| " + " | ".join(row) + " |")
 
+    lines.append("")
+    lines.append(f"model: {SUMMARY_METADATA['model']}")
+    lines.append(f"implementation: {SUMMARY_METADATA['implementation']}")
+    lines.append(f"trials: {SUMMARY_METADATA['trials']}")
+    lines.append(f"agent_counts: {SUMMARY_METADATA['agent_counts']}")
+    lines.append(f"live_groups: {SUMMARY_METADATA['live_groups']}")
+    lines.append(
+        f"prompt_history_turns: {FIXED_CONVERSATION_TURNS}"
+    )
+    lines.append(
+        "impl_overhead_ms is fix-specific pre-LLM work "
+        "(retrieval, embeddings, reranking, filtering). Baseline is 0.00ms."
+    )
+    lines.append(
+        "first_call_ms is deterministic prompt work excluding fix-specific overhead; "
+        "total_pre_llm_ms adds impl_overhead_ms. Both exclude network."
+    )
     lines.append("")
 
     for group in enabled_groups:
@@ -277,8 +362,27 @@ async def test_creation_accuracy(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.live
-async def test_accuracy_summary():
+async def test_accuracy_summary(wired_env_live, data_dir):
     """Print a summary table after all live accuracy measurements."""
+    env = wired_env_live
+    for agent_count in AGENT_COUNTS:
+        stats = measure_prompt_stats(env, data_dir, agent_count)
+        _record_prompt_result(agent_count, stats)
+
+    SUMMARY_METADATA.clear()
+    SUMMARY_METADATA.update(
+        {
+            "model": env.settings.interaction_agent_model,
+            "implementation": get_benchmark_implementation_name(),
+            "trials": str(TRIALS),
+            "agent_counts": ",".join(str(count) for count in AGENT_COUNTS),
+            "live_groups": ",".join(
+                group for group in ("reuse", "creation")
+                if is_live_group_enabled(group)
+            ),
+        }
+    )
+
     print(
         "\n\n"
         "Accuracy Summary\n"
