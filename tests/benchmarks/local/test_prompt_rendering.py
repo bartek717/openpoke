@@ -24,9 +24,9 @@ from server.agents.interaction_agent.agent import (
 )
 from server.agents.interaction_agent.tools import get_tool_schemas
 
-from .conftest import AGENT_COUNTS
-from .factories import populate_roster, write_conversation_log
-from .metrics import BenchmarkReport, PromptRenderingResult
+from ..conftest import AGENT_COUNTS
+from ..support.factories import populate_roster, write_conversation_log
+from ..support.metrics import BenchmarkReport, PromptRenderingResult
 
 
 _ENCODER = tiktoken.get_encoding("cl100k_base")

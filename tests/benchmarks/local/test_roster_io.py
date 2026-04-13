@@ -11,8 +11,8 @@ import pytest
 
 from server.services.execution.roster import AgentRoster
 
-from .conftest import AGENT_COUNTS
-from .factories import generate_agent_names
+from ..conftest import AGENT_COUNTS
+from ..support.factories import generate_agent_names
 
 
 @pytest.fixture()

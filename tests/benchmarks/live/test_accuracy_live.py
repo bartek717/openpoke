@@ -14,16 +14,20 @@ import pytest
 
 from server.agents.interaction_agent.runtime import InteractionAgentRuntime
 
-from .conftest import (
+from ..conftest import (
     AGENT_COUNTS,
     LIVE_TRIALS,
     ToolCallRecorder,
     is_live_group_enabled,
 )
-from .factories import populate_roster, write_conversation_log
+from ..support.factories import populate_roster, write_conversation_log
 
 
 TRIALS = LIVE_TRIALS
+LIVE_RESULTS: Dict[str, Dict[int, Dict[str, Any]]] = {
+    "reuse": {},
+    "creation": {},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +86,56 @@ def _score_creation(tool_calls: List[Dict], roster_names: List[str]) -> float:
     if chosen_name and chosen_name not in roster_set:
         return 1.0
     return 0.0
+
+
+def _record_live_result(
+    group: str,
+    agent_count: int,
+    scores: List[float],
+    mean_score: float,
+) -> None:
+    LIVE_RESULTS[group][agent_count] = {
+        "scores": scores.copy(),
+        "mean": mean_score,
+    }
+
+
+def _format_accuracy_summary_table() -> str:
+    enabled_groups = [
+        group for group in ("reuse", "creation") if is_live_group_enabled(group)
+    ]
+    if not enabled_groups:
+        return "No live groups enabled."
+
+    headers = ["agents", *enabled_groups]
+    align = ["-----:", *["-----:" for _ in enabled_groups]]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(align) + " |",
+    ]
+
+    for agent_count in AGENT_COUNTS:
+        row = [str(agent_count)]
+        for group in enabled_groups:
+            result = LIVE_RESULTS[group].get(agent_count)
+            row.append(f"{result['mean']:.2f}" if result is not None else "-")
+        lines.append("| " + " | ".join(row) + " |")
+
+    lines.append("")
+
+    for group in enabled_groups:
+        parts = []
+        for agent_count in AGENT_COUNTS:
+            result = LIVE_RESULTS[group].get(agent_count)
+            if result is None:
+                continue
+            parts.append(
+                f"{agent_count}={result['scores']} (mean={result['mean']:.2f})"
+            )
+        if parts:
+            lines.append(f"{group}: " + ", ".join(parts))
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +198,7 @@ async def test_reuse_accuracy(
         )
 
     mean_score = sum(scores) / len(scores)
+    _record_live_result("reuse", agent_count, scores, mean_score)
     print(
         f"\n  REUSE agents={agent_count:>5} | "
         f"scores={scores}, mean={mean_score:.2f}"
@@ -210,6 +265,7 @@ async def test_creation_accuracy(
         )
 
     mean_score = sum(scores) / len(scores)
+    _record_live_result("creation", agent_count, scores, mean_score)
     print(
         f"\n  CREATION agents={agent_count:>5} | "
         f"scores={scores}, mean={mean_score:.2f}"
@@ -221,14 +277,10 @@ async def test_creation_accuracy(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.live
-async def test_accuracy_summary(wired_env_live, data_dir, capsys):
-    """Print a summary table header. Run after all parametrized tests."""
-    # This test just prints the header for readability when running the full suite
+async def test_accuracy_summary():
+    """Print a summary table after all live accuracy measurements."""
     print(
         "\n\n"
         "Accuracy Summary\n"
-        "Run individual tests above for per-scale results.\n"
-        "Expected output format:\n"
-        "  REUSE   agents=N | scores=[...], mean=X.XX\n"
-        "  CREATE  agents=N | scores=[...], mean=X.XX\n"
+        f"{_format_accuracy_summary_table()}\n"
     )

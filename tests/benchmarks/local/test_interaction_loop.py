@@ -13,9 +13,9 @@ import pytest
 
 from server.agents.interaction_agent.runtime import InteractionAgentRuntime
 
-from .conftest import AGENT_COUNTS, ToolCallRecorder
-from .factories import populate_roster, write_conversation_log
-from .mock_llm import (
+from ..conftest import AGENT_COUNTS, ToolCallRecorder
+from ..support.factories import populate_roster, write_conversation_log
+from ..support.mock_llm import (
     MockOpenRouterResponder,
     scenario_dispatch_one,
     scenario_fan_out,
@@ -60,7 +60,7 @@ async def test_loop_dispatch_one(
 
     # Set up tool recorder
     from server.agents.interaction_agent.tools import handle_tool_call
-    from .conftest import ToolCallRecorder
+    from ..conftest import ToolCallRecorder
     recorder = ToolCallRecorder(handle_tool_call)
     monkeypatch.setattr(
         "server.agents.interaction_agent.runtime.handle_tool_call", recorder

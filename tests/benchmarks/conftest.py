@@ -16,7 +16,7 @@ from server.services.conversation.log import ConversationLog
 from server.services.conversation.summarization.working_memory_log import WorkingMemoryLog
 from server.agents.interaction_agent.tools import ToolResult
 
-from .mock_llm import MockOpenRouterResponder
+from .support.mock_llm import MockOpenRouterResponder
 
 
 # ---------------------------------------------------------------------------
