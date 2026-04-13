@@ -264,3 +264,96 @@ def tool_recorder(monkeypatch: pytest.MonkeyPatch, wired_env) -> ToolCallRecorde
         "server.agents.interaction_agent.runtime.handle_tool_call", recorder
     )
     return recorder
+
+
+# ---------------------------------------------------------------------------
+# V3: Live environment — temp-backed files but REAL LLM calls
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def live_settings() -> Settings:
+    """Settings using the real API key from environment."""
+    import os
+
+    get_settings.cache_clear()
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        pytest.skip("OPENROUTER_API_KEY not set — skipping live test")
+    return Settings(
+        openrouter_api_key=api_key,
+        conversation_summary_threshold=0,
+    )
+
+
+@pytest.fixture()
+def wired_env_live(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_roster: AgentRoster,
+    temp_conversation_log: ConversationLog,
+    temp_working_memory: WorkingMemoryLog,
+    temp_exec_logs: ExecutionAgentLogStore,
+    live_settings: Settings,
+):
+    """Like wired_env but uses the REAL OpenRouter API. No LLM mock."""
+
+    get_settings.cache_clear()
+    monkeypatch.setattr("server.config.get_settings", lambda: live_settings)
+
+    # --- AgentRoster ---
+    monkeypatch.setattr("server.services.execution.roster._agent_roster", temp_roster)
+    _roster_getter = lambda: temp_roster
+    monkeypatch.setattr("server.services.execution.roster.get_agent_roster", _roster_getter)
+    monkeypatch.setattr("server.services.execution.get_agent_roster", _roster_getter)
+    monkeypatch.setattr("server.services.get_agent_roster", _roster_getter)
+    monkeypatch.setattr("server.agents.interaction_agent.agent.get_agent_roster", _roster_getter)
+    monkeypatch.setattr("server.agents.interaction_agent.tools.get_agent_roster", _roster_getter)
+
+    # --- ConversationLog ---
+    monkeypatch.setattr("server.services.conversation.log._conversation_log", temp_conversation_log)
+    _conv_getter = lambda: temp_conversation_log
+    monkeypatch.setattr("server.services.conversation.log.get_conversation_log", _conv_getter)
+    monkeypatch.setattr("server.services.conversation.get_conversation_log", _conv_getter)
+    monkeypatch.setattr("server.agents.interaction_agent.tools.get_conversation_log", _conv_getter)
+    monkeypatch.setattr("server.agents.interaction_agent.runtime.get_conversation_log", _conv_getter)
+
+    # --- WorkingMemoryLog ---
+    monkeypatch.setattr(
+        "server.services.conversation.summarization.working_memory_log._working_memory_log",
+        temp_working_memory,
+    )
+    _wm_getter = lambda: temp_working_memory
+    monkeypatch.setattr("server.services.conversation.summarization.working_memory_log.get_working_memory_log", _wm_getter)
+    monkeypatch.setattr("server.services.conversation.summarization.get_working_memory_log", _wm_getter)
+    monkeypatch.setattr("server.services.conversation.get_working_memory_log", _wm_getter)
+    monkeypatch.setattr("server.agents.interaction_agent.runtime.get_working_memory_log", _wm_getter)
+    monkeypatch.setattr("server.services.conversation.log._resolve_working_memory_log", _wm_getter)
+
+    # --- ExecutionAgentLogStore ---
+    monkeypatch.setattr("server.services.execution.log_store._execution_agent_logs", temp_exec_logs)
+    _exec_getter = lambda: temp_exec_logs
+    monkeypatch.setattr("server.services.execution.log_store.get_execution_agent_logs", _exec_getter)
+    monkeypatch.setattr("server.services.execution.get_execution_agent_logs", _exec_getter)
+    monkeypatch.setattr("server.services.get_execution_agent_logs", _exec_getter)
+    monkeypatch.setattr("server.agents.interaction_agent.tools.get_execution_agent_logs", _exec_getter)
+
+    # --- Stub batch manager (don't fire real execution agents) ---
+    from server.agents.execution_agent.runtime import ExecutionResult
+
+    async def _noop_execute_agent(agent_name, instructions, request_id=None):
+        return ExecutionResult(agent_name=agent_name, success=True, response="Mocked.")
+
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.tools._EXECUTION_BATCH_MANAGER.execute_agent",
+        _noop_execute_agent,
+    )
+
+    # NOTE: request_chat_completion is NOT patched — real API calls
+
+    class _LiveEnv:
+        roster = temp_roster
+        conversation_log = temp_conversation_log
+        working_memory = temp_working_memory
+        exec_logs = temp_exec_logs
+        settings = live_settings
+
+    return _LiveEnv()
