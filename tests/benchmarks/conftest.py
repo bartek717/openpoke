@@ -22,7 +22,7 @@ from .mock_llm import MockOpenRouterResponder
 # Parametrize helpers
 # ---------------------------------------------------------------------------
 
-AGENT_COUNTS = [100, 500, 1000]
+AGENT_COUNTS = [5, 25, 100, 500, 1000, 2000]
 CONVERSATION_TURNS = [50, 200, 500]
 
 

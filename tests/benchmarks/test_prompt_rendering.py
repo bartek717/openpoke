@@ -5,6 +5,9 @@ Reports four numbers per case:
 2. Message render time (prepare_message_with_history())
 3. Serialized payload bytes (full OpenRouter request body)
 4. Estimated tokens (tiktoken cl100k_base)
+
+This benchmark intentionally keeps conversation history fixed so we can
+isolate how the active-agent roster alone affects prompt growth.
 """
 
 from __future__ import annotations
@@ -27,8 +30,8 @@ from .metrics import BenchmarkReport, PromptRenderingResult
 
 _ENCODER = tiktoken.get_encoding("cl100k_base")
 
-AGENT_COUNTS = [100, 500, 1000]
-CONVERSATION_TURNS = [50, 200, 500]
+AGENT_COUNTS = [5, 25, 100, 500, 1000, 2000]
+FIXED_CONVERSATION_TURNS = 50
 
 
 def _count_tokens(text: str) -> int:
@@ -50,20 +53,18 @@ def _build_openrouter_payload(
 
 
 @pytest.mark.parametrize("agent_count", AGENT_COUNTS)
-@pytest.mark.parametrize("conversation_turns", CONVERSATION_TURNS)
 def test_prompt_size_at_scale(
     agent_count: int,
-    conversation_turns: int,
     wired_env,
     data_dir,
 ):
-    """Measure prompt rendering cost at different roster and conversation sizes."""
+    """Measure prompt rendering cost while varying roster size only."""
     env = wired_env
 
     # --- Populate data ---
     populate_roster(env.roster, agent_count)
     conv_path = data_dir / "conversation" / "poke_conversation.log"
-    write_conversation_log(conv_path, conversation_turns)
+    write_conversation_log(conv_path, FIXED_CONVERSATION_TURNS)
     # Re-create the conversation log to pick up the written file
     # (the fixture created it before we wrote content)
 
@@ -95,7 +96,7 @@ def test_prompt_size_at_scale(
     # --- Report ---
     result = PromptRenderingResult(
         agent_count=agent_count,
-        conversation_turns=conversation_turns,
+        conversation_turns=FIXED_CONVERSATION_TURNS,
         roster_load_ms=roster_load_ms,
         render_ms=render_ms,
         payload_bytes=payload_bytes,
@@ -103,7 +104,7 @@ def test_prompt_size_at_scale(
     )
 
     print(
-        f"\n  agents={agent_count:>5}, turns={conversation_turns:>4} | "
+        f"\n  agents={agent_count:>5}, turns={FIXED_CONVERSATION_TURNS:>4} | "
         f"roster={roster_load_ms:>6.2f}ms, render={render_ms:>6.2f}ms, "
         f"payload={payload_bytes / 1024:>6.1f}KB, tokens={estimated_tokens:>,}"
     )

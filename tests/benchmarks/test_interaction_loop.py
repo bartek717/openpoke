@@ -24,7 +24,7 @@ from .mock_llm import (
 )
 
 
-AGENT_COUNTS = [100, 500, 1000]
+AGENT_COUNTS = [5, 25, 100, 500, 1000, 2000]
 
 
 def _format_tool_sequence(recorder: ToolCallRecorder) -> str:

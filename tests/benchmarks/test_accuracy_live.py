@@ -18,7 +18,7 @@ from .conftest import ToolCallRecorder
 from .factories import populate_roster, write_conversation_log
 
 
-AGENT_COUNTS = [5, 25, 100, 500, 1000]
+AGENT_COUNTS = [5, 25, 100, 500, 1000, 2000]
 TRIALS = 3
 
 
