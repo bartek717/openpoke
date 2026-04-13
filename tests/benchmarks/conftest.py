@@ -76,10 +76,15 @@ def temp_exec_logs(data_dir: Path) -> ExecutionAgentLogStore:
 
 @pytest.fixture()
 def fake_settings() -> Settings:
+    import os
+
     get_settings.cache_clear()
+    benchmark_model = os.getenv("OPENPOKE_BENCHMARK_MODEL", "anthropic/claude-sonnet-4")
     return Settings(
         openrouter_api_key="fake-benchmark-key",
         conversation_summary_threshold=0,  # disables summarization
+        interaction_agent_model=benchmark_model,
+        execution_agent_model=benchmark_model,
     )
 
 
@@ -327,16 +332,19 @@ def tool_recorder(monkeypatch: pytest.MonkeyPatch, wired_env) -> ToolCallRecorde
 
 @pytest.fixture()
 def live_settings() -> Settings:
-    """Settings using the real API key from environment."""
+    """Settings using the real API key and a cheap benchmark model override."""
     import os
 
     get_settings.cache_clear()
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         pytest.skip("OPENROUTER_API_KEY not set — skipping live test")
+    benchmark_model = os.getenv("OPENPOKE_BENCHMARK_MODEL", "anthropic/claude-sonnet-4")
     return Settings(
         openrouter_api_key=api_key,
         conversation_summary_threshold=0,
+        interaction_agent_model=benchmark_model,
+        execution_agent_model=benchmark_model,
     )
 
 
