@@ -176,9 +176,12 @@ class ExecutionAgentLogStore:
             logger.error(f"Failed to clear execution logs: {exc}")
 
 
-_execution_agent_logs = ExecutionAgentLogStore(_EXECUTION_LOG_DIR)
+_execution_agent_logs: ExecutionAgentLogStore | None = None
 
 
 def get_execution_agent_logs() -> ExecutionAgentLogStore:
     """Get the singleton log store instance."""
+    global _execution_agent_logs
+    if _execution_agent_logs is None:
+        _execution_agent_logs = ExecutionAgentLogStore(_EXECUTION_LOG_DIR)
     return _execution_agent_logs

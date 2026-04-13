@@ -84,9 +84,12 @@ class AgentRoster:
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 _ROSTER_PATH = _DATA_DIR / "execution_agents" / "roster.json"
 
-_agent_roster = AgentRoster(_ROSTER_PATH)
+_agent_roster: AgentRoster | None = None
 
 
 def get_agent_roster() -> AgentRoster:
     """Get the singleton roster instance."""
+    global _agent_roster
+    if _agent_roster is None:
+        _agent_roster = AgentRoster(_ROSTER_PATH)
     return _agent_roster

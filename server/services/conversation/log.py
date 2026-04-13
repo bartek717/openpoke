@@ -211,10 +211,13 @@ class ConversationLog:
             )
 
 
-_conversation_log = ConversationLog(_CONVERSATION_LOG_PATH)
+_conversation_log: Optional[ConversationLog] = None
 
 
 def get_conversation_log() -> ConversationLog:
+    global _conversation_log
+    if _conversation_log is None:
+        _conversation_log = ConversationLog(_CONVERSATION_LOG_PATH)
     return _conversation_log
 
 

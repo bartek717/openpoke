@@ -1,27 +1,21 @@
-"""V3 Benchmark: Live accuracy tests with real OpenRouter API calls.
+"""V3 Benchmark: Live accuracy tests against the real interaction runtime.
 
-Measures whether the LLM can correctly reuse/create agents and follow
-instruction order at scale. Marked with @pytest.mark.live — skipped by
-default, run with: pytest -m live
-
-Each test runs 3 trials per agent_count with the target agent at a
-randomized roster position. Scoring is derived from the actual tool_calls
-in the API response.
+Measures whether the interaction loop can still reuse or create the right
+agent and whether it notifies the user before delegating as the roster grows.
+Marked with @pytest.mark.live — skipped by default, run with: pytest -m live
 """
 
 from __future__ import annotations
 
-import json
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import pytest
 
-from server.agents.interaction_agent.agent import build_system_prompt, prepare_message_with_history
-from server.agents.interaction_agent.tools import get_tool_schemas
-from server.openrouter_client import request_chat_completion
+from server.agents.interaction_agent.runtime import InteractionAgentRuntime
 
-from .factories import generate_agent_names, populate_roster, write_conversation_log
+from .conftest import ToolCallRecorder
+from .factories import populate_roster, write_conversation_log
 
 
 AGENT_COUNTS = [5, 25, 100, 500, 1000]
@@ -32,67 +26,56 @@ TRIALS = 3
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _extract_tool_calls(response: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract parsed tool calls from an OpenRouter response."""
-    choice = (response.get("choices") or [{}])[0]
-    message = choice.get("message", {})
-    raw = message.get("tool_calls") or []
+def _tool_calls_from_recorder(recorder: ToolCallRecorder) -> List[Dict[str, Any]]:
+    """Convert recorded tool invocations into a serializable benchmark shape."""
+    return [
+        {
+            "name": invocation.name,
+            "arguments": invocation.arguments,
+            "result": invocation.result.payload,
+        }
+        for invocation in recorder.invocations
+    ]
 
-    parsed = []
-    for tc in raw:
-        func = tc.get("function", {})
-        name = func.get("name", "")
-        args_raw = func.get("arguments", "{}")
-        if isinstance(args_raw, str):
-            try:
-                args = json.loads(args_raw) if args_raw.strip() else {}
-            except json.JSONDecodeError:
-                args = {}
-        else:
-            args = args_raw or {}
-        parsed.append({"name": name, "arguments": args})
-    return parsed
+
+async def _run_live_interaction(
+    user_message: str,
+    recorder: ToolCallRecorder,
+) -> tuple[bool, str | None, List[Dict[str, Any]]]:
+    """Execute the real InteractionAgentRuntime and return its observed tool calls."""
+
+    recorder.invocations.clear()
+    runtime = InteractionAgentRuntime()
+    result = await runtime.execute(user_message)
+    return result.success, result.error, _tool_calls_from_recorder(recorder)
 
 
 def _score_reuse(tool_calls: List[Dict], target_name: str) -> float:
     """Score agent reuse accuracy.
 
-    1.0 = exact match, 0.5 = partial match, 0.0 = wrong/new agent
+    1.0 = exactly one delegation to the expected existing agent, else 0.0
     """
     agent_calls = [tc for tc in tool_calls if tc["name"] == "send_message_to_agent"]
-    if not agent_calls:
+    if len(agent_calls) != 1:
         return 0.0
 
-    chosen_name = agent_calls[0]["arguments"].get("agent_name", "")
-
-    if chosen_name == target_name:
-        return 1.0
-
-    # Partial match: check if key words overlap
-    target_words = set(target_name.lower().split())
-    chosen_words = set(chosen_name.lower().split())
-    overlap = target_words & chosen_words
-    # Need at least 2 meaningful words in common (exclude short words)
-    meaningful_overlap = {w for w in overlap if len(w) > 2}
-    if len(meaningful_overlap) >= 2:
-        return 0.5
-
-    return 0.0
+    chosen_name = str(agent_calls[0]["arguments"].get("agent_name", "")).strip()
+    return 1.0 if chosen_name == target_name else 0.0
 
 
 def _score_creation(tool_calls: List[Dict], roster_names: List[str]) -> float:
     """Score agent creation accuracy.
 
-    1.0 = created new agent not in roster, 0.0 = reused existing
+    1.0 = exactly one delegation to a non-empty agent name not in roster, else 0.0
     """
     agent_calls = [tc for tc in tool_calls if tc["name"] == "send_message_to_agent"]
-    if not agent_calls:
-        return 0.0  # didn't delegate at all
+    if len(agent_calls) != 1:
+        return 0.0
 
-    chosen_name = agent_calls[0]["arguments"].get("agent_name", "")
+    chosen_name = str(agent_calls[0]["arguments"].get("agent_name", "")).strip()
     roster_set = set(roster_names)
 
-    if chosen_name not in roster_set:
+    if chosen_name and chosen_name not in roster_set:
         return 1.0
     return 0.0
 
@@ -100,7 +83,7 @@ def _score_creation(tool_calls: List[Dict], roster_names: List[str]) -> float:
 def _score_instruction_order(tool_calls: List[Dict]) -> float:
     """Score whether send_message_to_user comes before send_message_to_agent.
 
-    1.0 = correct order, 0.0 = wrong order or missing user notification
+    1.0 = correct order, 0.0 = missing delegation or missing/wrong notification order
     """
     user_idx = None
     agent_idx = None
@@ -112,99 +95,12 @@ def _score_instruction_order(tool_calls: List[Dict]) -> float:
             agent_idx = i
 
     if agent_idx is None:
-        # No delegation — instruction order not applicable, count as pass
-        return 1.0
+        return 0.0
 
     if user_idx is not None and user_idx < agent_idx:
         return 1.0
 
     return 0.0
-
-
-async def _run_llm_loop(
-    user_message: str,
-    transcript: str,
-    api_key: str,
-    model: str = "anthropic/claude-sonnet-4",
-    max_turns: int = 3,
-) -> List[Dict[str, Any]]:
-    """Run up to max_turns of the interaction agent loop, collecting all tool calls.
-
-    The LLM may split send_message_to_user and send_message_to_agent across
-    turns (notify user first, delegate second). This loop simulates that by
-    feeding synthetic tool results back for each turn.
-
-    Returns the aggregated list of tool calls across all turns.
-    """
-    system_prompt = build_system_prompt()
-    messages = prepare_message_with_history(user_message, transcript)
-    tools = get_tool_schemas()
-    all_tool_calls: List[Dict[str, Any]] = []
-
-    for turn in range(max_turns):
-        response = await request_chat_completion(
-            model=model,
-            messages=messages,
-            system=system_prompt,
-            api_key=api_key,
-            tools=tools,
-        )
-
-        choice = (response.get("choices") or [{}])[0]
-        assistant_message = choice.get("message", {})
-
-        # Append assistant message to conversation
-        assistant_entry: Dict[str, Any] = {
-            "role": "assistant",
-            "content": assistant_message.get("content", "") or "",
-        }
-        raw_tool_calls = assistant_message.get("tool_calls") or []
-        if raw_tool_calls:
-            assistant_entry["tool_calls"] = raw_tool_calls
-        messages.append(assistant_entry)
-
-        # Parse tool calls from this turn
-        turn_calls = _extract_tool_calls(response)
-        all_tool_calls.extend(turn_calls)
-
-        # If no tool calls, the LLM is done
-        if not turn_calls:
-            break
-
-        # Feed synthetic tool results back so the loop can continue
-        for tc in raw_tool_calls:
-            tool_id = tc.get("id", "unknown")
-            func = tc.get("function", {})
-            name = func.get("name", "")
-
-            if name == "send_message_to_user":
-                result = json.dumps({"tool": name, "status": "success", "result": {"status": "delivered"}})
-            elif name == "send_message_to_agent":
-                args = func.get("arguments", "{}")
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        args = {}
-                agent_name = args.get("agent_name", "unknown")
-                result = json.dumps({
-                    "tool": name, "status": "success",
-                    "result": {"status": "submitted", "agent_name": agent_name, "new_agent_created": True},
-                })
-            elif name == "send_draft":
-                result = json.dumps({"tool": name, "status": "success", "result": {"status": "draft_recorded"}})
-            elif name == "wait":
-                result = json.dumps({"tool": name, "status": "success", "result": {"status": "waiting"}})
-            else:
-                result = json.dumps({"tool": name, "status": "success"})
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_id,
-                "content": result,
-            })
-
-    return all_tool_calls
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +113,7 @@ async def test_reuse_accuracy(
     agent_count: int,
     wired_env_live,
     data_dir,
+    tool_recorder_live: ToolCallRecorder,
 ):
     """Does the LLM pick the right existing agent from a large roster?"""
     env = wired_env_live
@@ -225,6 +122,7 @@ async def test_reuse_accuracy(
     for trial in range(TRIALS):
         # Fresh roster each trial with different seed for position randomization
         env.roster.clear()
+        env.conversation_log.clear()
         names = populate_roster(env.roster, agent_count, seed=42)
 
         # Pick target at randomized position
@@ -240,9 +138,9 @@ async def test_reuse_accuracy(
         # Extract the person/topic from the agent name for a natural query
         user_message = f"Follow up on the task handled by the agent called '{target_name}'"
 
-        transcript = env.conversation_log.load_transcript()
-        tool_calls = await _run_llm_loop(
-            user_message, transcript, env.settings.openrouter_api_key
+        success, error, tool_calls = await _run_live_interaction(
+            user_message,
+            tool_recorder_live,
         )
 
         score = _score_reuse(tool_calls, target_name)
@@ -256,7 +154,8 @@ async def test_reuse_accuracy(
         print(
             f"\n  reuse trial {trial + 1}/{TRIALS} | agents={agent_count}, "
             f"target='{target_name}' (pos {target_idx}), "
-            f"chosen='{chosen}', score={score}"
+            f"chosen='{chosen}', success={success}, "
+            f"error={error or 'none'}, score={score}"
         )
 
     mean_score = sum(scores) / len(scores)
@@ -278,6 +177,7 @@ async def test_creation_accuracy(
     agent_count: int,
     wired_env_live,
     data_dir,
+    tool_recorder_live: ToolCallRecorder,
 ):
     """Does the LLM create a new agent when no existing one matches?"""
     env = wired_env_live
@@ -292,16 +192,17 @@ async def test_creation_accuracy(
 
     for trial in range(TRIALS):
         env.roster.clear()
+        env.conversation_log.clear()
         names = populate_roster(env.roster, agent_count, seed=42)
 
         conv_path = data_dir / "conversation" / "poke_conversation.log"
         write_conversation_log(conv_path, 10, seed=trial)
 
         user_message = novel_topics[trial]
-        transcript = env.conversation_log.load_transcript()
 
-        tool_calls = await _run_llm_loop(
-            user_message, transcript, env.settings.openrouter_api_key
+        success, error, tool_calls = await _run_live_interaction(
+            user_message,
+            tool_recorder_live,
         )
 
         score = _score_creation(tool_calls, names)
@@ -315,7 +216,8 @@ async def test_creation_accuracy(
         print(
             f"\n  creation trial {trial + 1}/{TRIALS} | agents={agent_count}, "
             f"topic='{user_message[:50]}...', "
-            f"chosen='{chosen}', in_roster={chosen in names}, score={score}"
+            f"chosen='{chosen}', in_roster={chosen in names}, "
+            f"success={success}, error={error or 'none'}, score={score}"
         )
 
     mean_score = sum(scores) / len(scores)
@@ -335,6 +237,7 @@ async def test_instruction_order_accuracy(
     agent_count: int,
     wired_env_live,
     data_dir,
+    tool_recorder_live: ToolCallRecorder,
 ):
     """Does the LLM call send_message_to_user before send_message_to_agent?"""
     env = wired_env_live
@@ -342,16 +245,17 @@ async def test_instruction_order_accuracy(
     scores = []
     for trial in range(TRIALS):
         env.roster.clear()
-        names = populate_roster(env.roster, agent_count, seed=42)
+        env.conversation_log.clear()
+        populate_roster(env.roster, agent_count, seed=42)
 
         conv_path = data_dir / "conversation" / "poke_conversation.log"
         write_conversation_log(conv_path, 10, seed=trial)
 
         user_message = "Draft an email to someone about the quarterly review"
-        transcript = env.conversation_log.load_transcript()
 
-        tool_calls = await _run_llm_loop(
-            user_message, transcript, env.settings.openrouter_api_key
+        success, error, tool_calls = await _run_live_interaction(
+            user_message,
+            tool_recorder_live,
         )
 
         score = _score_instruction_order(tool_calls)
@@ -360,7 +264,8 @@ async def test_instruction_order_accuracy(
         tool_names = [tc["name"] for tc in tool_calls]
         print(
             f"\n  order trial {trial + 1}/{TRIALS} | agents={agent_count}, "
-            f"tools={tool_names}, score={score}"
+            f"tools={tool_names}, success={success}, "
+            f"error={error or 'none'}, score={score}"
         )
 
     mean_score = sum(scores) / len(scores)

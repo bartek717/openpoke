@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List
 
 import pytest
 
@@ -15,7 +15,6 @@ from server.services.conversation.log import ConversationLog
 from server.services.conversation.summarization.working_memory_log import WorkingMemoryLog
 from server.agents.interaction_agent.tools import ToolResult
 
-from .factories import populate_roster, write_conversation_log
 from .mock_llm import MockOpenRouterResponder
 
 
@@ -47,9 +46,17 @@ def temp_roster(data_dir: Path) -> AgentRoster:
 
 
 @pytest.fixture()
-def temp_conversation_log(data_dir: Path) -> ConversationLog:
+def temp_conversation_log(
+    monkeypatch: pytest.MonkeyPatch,
+    data_dir: Path,
+    temp_working_memory: WorkingMemoryLog,
+) -> ConversationLog:
     log_path = data_dir / "conversation" / "poke_conversation.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "server.services.conversation.log._resolve_working_memory_log",
+        lambda: temp_working_memory,
+    )
     return ConversationLog(log_path)
 
 
@@ -85,23 +92,32 @@ def mock_llm() -> MockOpenRouterResponder:
 # Wired runtime — patches every import site
 # ---------------------------------------------------------------------------
 
-@pytest.fixture()
-def wired_env(
+def _patch_settings_aliases(
     monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+) -> None:
+    """Patch cached settings getters at every import site used by benchmarks."""
+
+    get_settings.cache_clear()
+    getter = lambda: settings
+    monkeypatch.setattr("server.config.get_settings", getter)
+    monkeypatch.setattr("server.agents.interaction_agent.runtime.get_settings", getter)
+    monkeypatch.setattr("server.agents.execution_agent.runtime.get_settings", getter)
+    monkeypatch.setattr("server.services.conversation.log.get_settings", getter)
+    monkeypatch.setattr("server.services.conversation.summarization.summarizer.get_settings", getter)
+    monkeypatch.setattr("server.openrouter_client.client.get_settings", getter)
+
+
+def _wire_shared_singletons(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
     temp_roster: AgentRoster,
     temp_conversation_log: ConversationLog,
     temp_working_memory: WorkingMemoryLog,
     temp_exec_logs: ExecutionAgentLogStore,
-    fake_settings: Settings,
-    mock_llm: MockOpenRouterResponder,
-):
-    """Patch all singletons and return a namespace with the temp objects."""
+) -> None:
+    """Patch production singletons and getters to temp-backed benchmark instances."""
 
-    # --- Settings (lru_cache must be cleared first) ---
-    get_settings.cache_clear()
-    monkeypatch.setattr("server.config.get_settings", lambda: fake_settings)
-
-    # --- AgentRoster: module-level singleton + getter at every import site ---
     monkeypatch.setattr(
         "server.services.execution.roster._agent_roster", temp_roster
     )
@@ -122,7 +138,6 @@ def wired_env(
         "server.agents.interaction_agent.tools.get_agent_roster", _roster_getter
     )
 
-    # --- ConversationLog: module-level singleton + getter ---
     monkeypatch.setattr(
         "server.services.conversation.log._conversation_log", temp_conversation_log
     )
@@ -139,8 +154,11 @@ def wired_env(
     monkeypatch.setattr(
         "server.agents.interaction_agent.runtime.get_conversation_log", _conv_getter
     )
+    monkeypatch.setattr(
+        "server.services.conversation.summarization.summarizer._resolve_conversation_log",
+        _conv_getter,
+    )
 
-    # --- WorkingMemoryLog: module-level singleton + getter ---
     monkeypatch.setattr(
         "server.services.conversation.summarization.working_memory_log._working_memory_log",
         temp_working_memory,
@@ -160,13 +178,15 @@ def wired_env(
     monkeypatch.setattr(
         "server.agents.interaction_agent.runtime.get_working_memory_log", _wm_getter
     )
-    # ConversationLog.__init__ resolves working memory via lazy import
     monkeypatch.setattr(
         "server.services.conversation.log._resolve_working_memory_log",
         _wm_getter,
     )
+    monkeypatch.setattr(
+        "server.services.conversation.summarization.summarizer.get_working_memory_log",
+        _wm_getter,
+    )
 
-    # --- ExecutionAgentLogStore: module-level singleton + getter ---
     monkeypatch.setattr(
         "server.services.execution.log_store._execution_agent_logs", temp_exec_logs
     )
@@ -183,8 +203,66 @@ def wired_env(
     monkeypatch.setattr(
         "server.agents.interaction_agent.tools.get_execution_agent_logs", _exec_getter
     )
+    monkeypatch.setattr(
+        "server.agents.execution_agent.agent.get_execution_agent_logs", _exec_getter
+    )
 
-    # --- OpenRouter mock at every import site ---
+
+def _patch_batch_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub execution-agent dispatch so benchmarks stay inside the interaction loop."""
+
+    class _StubBatchManager:
+        async def execute_agent(self, agent_name, instructions, request_id=None):
+            class _Result:
+                def __init__(self):
+                    self.agent_name = agent_name
+                    self.success = True
+                    self.response = "Mocked execution."
+
+            return _Result()
+
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.tools._get_execution_batch_manager",
+        lambda: _StubBatchManager(),
+    )
+
+
+def _install_tool_recorder(monkeypatch: pytest.MonkeyPatch) -> "ToolCallRecorder":
+    """Wrap handle_tool_call and patch both the tools and runtime import sites."""
+
+    from server.agents.interaction_agent.tools import handle_tool_call
+
+    recorder = ToolCallRecorder(handle_tool_call)
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.tools.handle_tool_call", recorder
+    )
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.runtime.handle_tool_call", recorder
+    )
+    return recorder
+
+
+@pytest.fixture()
+def wired_env(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_roster: AgentRoster,
+    temp_conversation_log: ConversationLog,
+    temp_working_memory: WorkingMemoryLog,
+    temp_exec_logs: ExecutionAgentLogStore,
+    fake_settings: Settings,
+    mock_llm: MockOpenRouterResponder,
+):
+    """Patch all singletons and return a namespace with the temp objects."""
+
+    _patch_settings_aliases(monkeypatch, fake_settings)
+    _wire_shared_singletons(
+        monkeypatch,
+        temp_roster=temp_roster,
+        temp_conversation_log=temp_conversation_log,
+        temp_working_memory=temp_working_memory,
+        temp_exec_logs=temp_exec_logs,
+    )
+
     monkeypatch.setattr(
         "server.openrouter_client.client.request_chat_completion", mock_llm
     )
@@ -195,21 +273,7 @@ def wired_env(
         "server.agents.execution_agent.runtime.request_chat_completion", mock_llm
     )
 
-    # --- V2: Stub out the batch manager so send_message_to_agent doesn't
-    # fire real execution agents ---
-    from server.agents.execution_agent.runtime import ExecutionResult
-
-    async def _noop_execute_agent(agent_name, instructions, request_id=None):
-        return ExecutionResult(
-            agent_name=agent_name,
-            success=True,
-            response="Mocked execution.",
-        )
-
-    monkeypatch.setattr(
-        "server.agents.interaction_agent.tools._EXECUTION_BATCH_MANAGER.execute_agent",
-        _noop_execute_agent,
-    )
+    _patch_batch_manager(monkeypatch)
 
     class _WiredEnv:
         roster = temp_roster
@@ -254,16 +318,7 @@ class ToolCallRecorder:
 @pytest.fixture()
 def tool_recorder(monkeypatch: pytest.MonkeyPatch, wired_env) -> ToolCallRecorder:
     """Wrap handle_tool_call with a recorder. Must be used after wired_env."""
-    from server.agents.interaction_agent.tools import handle_tool_call
-
-    recorder = ToolCallRecorder(handle_tool_call)
-    monkeypatch.setattr(
-        "server.agents.interaction_agent.tools.handle_tool_call", recorder
-    )
-    monkeypatch.setattr(
-        "server.agents.interaction_agent.runtime.handle_tool_call", recorder
-    )
-    return recorder
+    return _install_tool_recorder(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -296,58 +351,15 @@ def wired_env_live(
 ):
     """Like wired_env but uses the REAL OpenRouter API. No LLM mock."""
 
-    get_settings.cache_clear()
-    monkeypatch.setattr("server.config.get_settings", lambda: live_settings)
-
-    # --- AgentRoster ---
-    monkeypatch.setattr("server.services.execution.roster._agent_roster", temp_roster)
-    _roster_getter = lambda: temp_roster
-    monkeypatch.setattr("server.services.execution.roster.get_agent_roster", _roster_getter)
-    monkeypatch.setattr("server.services.execution.get_agent_roster", _roster_getter)
-    monkeypatch.setattr("server.services.get_agent_roster", _roster_getter)
-    monkeypatch.setattr("server.agents.interaction_agent.agent.get_agent_roster", _roster_getter)
-    monkeypatch.setattr("server.agents.interaction_agent.tools.get_agent_roster", _roster_getter)
-
-    # --- ConversationLog ---
-    monkeypatch.setattr("server.services.conversation.log._conversation_log", temp_conversation_log)
-    _conv_getter = lambda: temp_conversation_log
-    monkeypatch.setattr("server.services.conversation.log.get_conversation_log", _conv_getter)
-    monkeypatch.setattr("server.services.conversation.get_conversation_log", _conv_getter)
-    monkeypatch.setattr("server.agents.interaction_agent.tools.get_conversation_log", _conv_getter)
-    monkeypatch.setattr("server.agents.interaction_agent.runtime.get_conversation_log", _conv_getter)
-
-    # --- WorkingMemoryLog ---
-    monkeypatch.setattr(
-        "server.services.conversation.summarization.working_memory_log._working_memory_log",
-        temp_working_memory,
+    _patch_settings_aliases(monkeypatch, live_settings)
+    _wire_shared_singletons(
+        monkeypatch,
+        temp_roster=temp_roster,
+        temp_conversation_log=temp_conversation_log,
+        temp_working_memory=temp_working_memory,
+        temp_exec_logs=temp_exec_logs,
     )
-    _wm_getter = lambda: temp_working_memory
-    monkeypatch.setattr("server.services.conversation.summarization.working_memory_log.get_working_memory_log", _wm_getter)
-    monkeypatch.setattr("server.services.conversation.summarization.get_working_memory_log", _wm_getter)
-    monkeypatch.setattr("server.services.conversation.get_working_memory_log", _wm_getter)
-    monkeypatch.setattr("server.agents.interaction_agent.runtime.get_working_memory_log", _wm_getter)
-    monkeypatch.setattr("server.services.conversation.log._resolve_working_memory_log", _wm_getter)
-
-    # --- ExecutionAgentLogStore ---
-    monkeypatch.setattr("server.services.execution.log_store._execution_agent_logs", temp_exec_logs)
-    _exec_getter = lambda: temp_exec_logs
-    monkeypatch.setattr("server.services.execution.log_store.get_execution_agent_logs", _exec_getter)
-    monkeypatch.setattr("server.services.execution.get_execution_agent_logs", _exec_getter)
-    monkeypatch.setattr("server.services.get_execution_agent_logs", _exec_getter)
-    monkeypatch.setattr("server.agents.interaction_agent.tools.get_execution_agent_logs", _exec_getter)
-
-    # --- Stub batch manager (don't fire real execution agents) ---
-    from server.agents.execution_agent.runtime import ExecutionResult
-
-    async def _noop_execute_agent(agent_name, instructions, request_id=None):
-        return ExecutionResult(agent_name=agent_name, success=True, response="Mocked.")
-
-    monkeypatch.setattr(
-        "server.agents.interaction_agent.tools._EXECUTION_BATCH_MANAGER.execute_agent",
-        _noop_execute_agent,
-    )
-
-    # NOTE: request_chat_completion is NOT patched — real API calls
+    _patch_batch_manager(monkeypatch)
 
     class _LiveEnv:
         roster = temp_roster
@@ -357,3 +369,13 @@ def wired_env_live(
         settings = live_settings
 
     return _LiveEnv()
+
+
+@pytest.fixture()
+def tool_recorder_live(
+    monkeypatch: pytest.MonkeyPatch,
+    wired_env_live,
+) -> ToolCallRecorder:
+    """Live-tool recorder that still executes the real tool functions."""
+
+    return _install_tool_recorder(monkeypatch)

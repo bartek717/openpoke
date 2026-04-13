@@ -3,12 +3,14 @@
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ...logging_config import logger
 from ...services.conversation import get_conversation_log
 from ...services.execution import get_agent_roster, get_execution_agent_logs
-from ..execution_agent.batch_manager import ExecutionBatchManager
+
+if TYPE_CHECKING:  # pragma: no cover - imported lazily at runtime
+    from ..execution_agent.batch_manager import ExecutionBatchManager
 
 
 @dataclass
@@ -105,7 +107,17 @@ TOOL_SCHEMAS = [
     },
 ]
 
-_EXECUTION_BATCH_MANAGER = ExecutionBatchManager()
+_EXECUTION_BATCH_MANAGER: "ExecutionBatchManager | None" = None
+
+
+def _get_execution_batch_manager() -> "ExecutionBatchManager":
+    """Lazily construct the batch manager so simple imports do not pull in execution-agent runtime."""
+    global _EXECUTION_BATCH_MANAGER
+    if _EXECUTION_BATCH_MANAGER is None:
+        from ..execution_agent.batch_manager import ExecutionBatchManager
+
+        _EXECUTION_BATCH_MANAGER = ExecutionBatchManager()
+    return _EXECUTION_BATCH_MANAGER
 
 
 # Create or reuse execution agent and dispatch instructions asynchronously
@@ -126,7 +138,7 @@ def send_message_to_agent(agent_name: str, instructions: str) -> ToolResult:
 
     async def _execute_async() -> None:
         try:
-            result = await _EXECUTION_BATCH_MANAGER.execute_agent(agent_name, instructions)
+            result = await _get_execution_batch_manager().execute_agent(agent_name, instructions)
             status = "SUCCESS" if result.success else "FAILED"
             logger.info(f"Agent '{agent_name}' completed: {status}")
         except Exception as exc:  # pragma: no cover - defensive
